@@ -3,6 +3,7 @@ import cv2
 import gradio as gr
 import numpy as np
 import torch
+import urllib.request
 from PIL import Image, ImageDraw
 from huggingface_hub import hf_hub_download
 
@@ -10,6 +11,30 @@ from huggingface_hub import hf_hub_download
 MODEL = None
 PROCESSOR = None
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
+def find_bpe_path():
+    """Locate the BPE vocabulary file or download it as a fallback."""
+    candidates = [
+        "/content/sam/sam3/sam3/assets/bpe_simple_vocab_16e6.txt.gz",
+        "./sam3/sam3/assets/bpe_simple_vocab_16e6.txt.gz",
+        "./sam3/assets/bpe_simple_vocab_16e6.txt.gz",
+        "/tmp/bpe_simple_vocab_16e6.txt.gz"
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            print(f"Found BPE vocabulary at: {path}")
+            return path
+            
+    # Fallback: Download from OpenAI CLIP repo
+    url = "https://github.com/openai/CLIP/raw/main/clip/bpe_simple_vocab_16e6.txt.gz"
+    dest = "/tmp/bpe_simple_vocab_16e6.txt.gz"
+    print(f"BPE vocabulary not found in packages. Downloading to {dest}...")
+    try:
+        urllib.request.urlretrieve(url, dest)
+        return dest
+    except Exception as e:
+        print(f"Failed to download BPE vocabulary: {e}")
+        return None
 
 def init_model(load_source="community", hf_token=None):
     global MODEL, PROCESSOR
@@ -36,14 +61,20 @@ def init_model(load_source="community", hf_token=None):
                 except Exception as e:
                     return f"Failed to login to Hugging Face: {str(e)}"
             print("Downloading SAM 3 weights from official repository (facebook/sam3)...")
-            # The official build function downloads the default checkpoint from facebook/sam3
             
-        print(f"Building SAM 3 model on {DEVICE}...")
+        bpe_path = find_bpe_path()
+        print(f"Building SAM 3 model on {DEVICE} with bpe_path={bpe_path}...")
         
         if checkpoint_path:
-            MODEL = build_sam3_image_model(checkpoint_path=checkpoint_path, load_from_HF=False)
+            MODEL = build_sam3_image_model(
+                checkpoint_path=checkpoint_path, 
+                load_from_HF=False, 
+                bpe_path=bpe_path
+            )
         else:
-            MODEL = build_sam3_image_model()
+            MODEL = build_sam3_image_model(
+                bpe_path=bpe_path
+            )
             
         MODEL.to(DEVICE)
         MODEL.eval()
