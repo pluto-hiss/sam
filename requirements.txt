@@ -3,7 +3,5 @@ huggingface_hub
 numpy
 pillow
 opencv-python
-torch
-torchvision
 tqdm
 matplotlib
