@@ -81,8 +81,13 @@ def segment_image(input_image, prompt_text):
             
         # Run inference
         with torch.no_grad():
-            inference_state = PROCESSOR.set_image(pil_image)
-            output = PROCESSOR.set_text_prompt(state=inference_state, prompt=prompt_text.strip())
+            if DEVICE == "cuda":
+                with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                    inference_state = PROCESSOR.set_image(pil_image)
+                    output = PROCESSOR.set_text_prompt(state=inference_state, prompt=prompt_text.strip())
+            else:
+                inference_state = PROCESSOR.set_image(pil_image)
+                output = PROCESSOR.set_text_prompt(state=inference_state, prompt=prompt_text.strip())
             
         masks = output.get("masks")
         boxes = output.get("boxes")
