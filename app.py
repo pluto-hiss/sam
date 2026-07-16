@@ -338,6 +338,45 @@ def interactive_click_segment(input_image, select_data: gr.SelectData):
         err_msg = traceback.format_exc()
         return None, f"Error running raw click prediction: {str(e)}\n\nDetails:\n{err_msg}"
 
+def download_zits_weights():
+    # 1. Ensure ZITS_inpainting folder is cloned
+    if not os.path.exists("ZITS_inpainting"):
+        print("Cloning ZITS_inpainting repository...")
+        import subprocess
+        subprocess.run(["git", "clone", "https://github.com/DQiaole/ZITS_inpainting.git"])
+        
+    # 2. Check if best_lsm_hawp.pth is downloaded
+    hawp_path = "ZITS_inpainting/ckpt/best_lsm_hawp.pth"
+    if not os.path.exists(hawp_path):
+        print("Downloading best_lsm_hawp.pth...")
+        os.makedirs(os.path.dirname(hawp_path), exist_ok=True)
+        import urllib.request
+        urllib.request.urlretrieve(
+            "https://huggingface.co/nguyenthanhtrung/LaMa_ZITS_cp/resolve/main/best_lsm_hawp.pth",
+            hawp_path
+        )
+        print("Downloaded best_lsm_hawp.pth!")
+        
+    # 3. Check if places2 transformer model is downloaded
+    places2_dir = "ZITS_inpainting/ckpt/zits_places2"
+    places2_model_path = os.path.join(places2_dir, "best_transformer_places2.pth")
+    if not os.path.exists(places2_model_path):
+        print("Downloading best_transformer_places2.pth...")
+        os.makedirs(places2_dir, exist_ok=True)
+        import urllib.request
+        urllib.request.urlretrieve(
+            "https://huggingface.co/nguyenthanhtrung/LaMa_ZITS_cp/resolve/main/best_transformer_places2.pth",
+            places2_model_path
+        )
+        print("Downloaded best_transformer_places2.pth!")
+        
+    # 4. Copy config file into place
+    config_dest = os.path.join(places2_dir, "config.yml")
+    if not os.path.exists(config_dest):
+        import shutil
+        shutil.copy("ZITS_inpainting/config/config_ZITS_places2.yml", config_dest)
+        print("Copied ZITS config file into ckpt folder.")
+
 def inpaint_object(model_choice, prompt_text):
     global LATEST_IMAGE, LATEST_MASK
     if LATEST_IMAGE is None or LATEST_MASK is None:
@@ -384,20 +423,10 @@ def inpaint_object(model_choice, prompt_text):
             LATEST_IMAGE.save("temp_inpaint_input.png")
             LATEST_MASK.save("temp_inpaint_mask.png")
             
-            # Clone ZITS_inpainting repository if not present
-            if not os.path.exists("ZITS_inpainting"):
-                print("Cloning DQiaole/ZITS_inpainting...")
-                import subprocess
-                subprocess.run(["git", "clone", "https://github.com/DQiaole/ZITS_inpainting.git"])
-                
-            # Set default checkpoint directories
+            # Ensure ZITS is cloned and checkpoints are downloaded
+            download_zits_weights()
+            
             ckpt_dir = "ZITS_inpainting/ckpt/zits_places2"
-            if not os.path.exists(ckpt_dir):
-                return None, (
-                    "ZITS repository cloned, but weights are missing. Please ensure you download "
-                    "the pre-trained model weights (Places2) and place them into ZITS_inpainting/ckpt/zits_places2/ "
-                    "before using this mode."
-                )
                 
             # Run ZITS single image test via subprocess
             import subprocess
