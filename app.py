@@ -339,45 +339,43 @@ def interactive_click_segment(input_image, select_data: gr.SelectData):
         return None, f"Error running raw click prediction: {str(e)}\n\nDetails:\n{err_msg}"
 
 def download_zits_weights():
-    # 1. Ensure ZITS_inpainting folder is cloned
-    if not os.path.exists("ZITS_inpainting"):
-        print("Cloning ZITS_inpainting repository...")
+    # 1. Ensure ZITS-PlusPlus folder is cloned
+    if not os.path.exists("ZITS-PlusPlus"):
+        print("Cloning ZITS-PlusPlus repository...")
         import subprocess
-        subprocess.run(["git", "clone", "https://github.com/DQiaole/ZITS_inpainting.git"])
+        subprocess.run(["git", "clone", "https://github.com/ewrfcas/ZITS-PlusPlus.git"])
         
     # 2. Check if best_lsm_hawp.pth is downloaded
-    hawp_path = "ZITS_inpainting/ckpt/best_lsm_hawp.pth"
+    ckpts_dir = "ZITS-PlusPlus/ckpts"
+    os.makedirs(ckpts_dir, exist_ok=True)
+    
+    hawp_path = os.path.join(ckpts_dir, "best_lsm_hawp.pth")
     if not os.path.exists(hawp_path):
         print("Downloading best_lsm_hawp.pth from Hugging Face...")
-        os.makedirs(os.path.dirname(hawp_path), exist_ok=True)
         downloaded_file = hf_hub_download(
-            repo_id="nguyenthanhtrung/LaMa_ZITS_cp", 
+            repo_id="jingwei-xu-00/pretrained_backup_for_streetunveiler",
+            subfolder="ZITS++",
             filename="best_lsm_hawp.pth"
         )
         import shutil
         shutil.copy(downloaded_file, hawp_path)
         print("Downloaded and copied best_lsm_hawp.pth!")
         
-    # 3. Check if places2 transformer model is downloaded
-    places2_dir = "ZITS_inpainting/ckpt/zits_places2"
-    places2_model_path = os.path.join(places2_dir, "best_transformer_places2.pth")
-    if not os.path.exists(places2_model_path):
-        print("Downloading best_transformer_places2.pth from Hugging Face...")
-        os.makedirs(places2_dir, exist_ok=True)
-        downloaded_file = hf_hub_download(
-            repo_id="nguyenthanhtrung/LaMa_ZITS_cp", 
-            filename="best_transformer_places2.pth"
+    # 3. Check if places2 transformer model is downloaded and extracted
+    model_dir = os.path.join(ckpts_dir, "model_512")
+    if not os.path.exists(model_dir) or not os.path.exists(os.path.join(model_dir, "models/last.ckpt")):
+        print("Downloading model_512.zip from Hugging Face...")
+        downloaded_zip = hf_hub_download(
+            repo_id="jingwei-xu-00/pretrained_backup_for_streetunveiler",
+            subfolder="ZITS++",
+            filename="model_512.zip"
         )
-        import shutil
-        shutil.copy(downloaded_file, places2_model_path)
-        print("Downloaded and copied best_transformer_places2.pth!")
-        
-    # 4. Copy config file into place
-    config_dest = os.path.join(places2_dir, "config.yml")
-    if not os.path.exists(config_dest):
-        import shutil
-        shutil.copy("ZITS_inpainting/config/config_ZITS_places2.yml", config_dest)
-        print("Copied ZITS config file into ckpt folder.")
+        # Unzip directly into ZITS-PlusPlus/ckpts
+        import zipfile
+        print(f"Extracting {downloaded_zip} to {ckpts_dir}...")
+        with zipfile.ZipFile(downloaded_zip, 'r') as zip_ref:
+            zip_ref.extractall(ckpts_dir)
+        print("Extracted model_512!")
 
 def inpaint_object(model_choice, prompt_text):
     global LATEST_IMAGE, LATEST_MASK
@@ -419,43 +417,60 @@ def inpaint_object(model_choice, prompt_text):
             return output, "Object successfully erased using Latent Diffusion!"
             
         elif model_choice.startswith("ZITS"):
-            print("Running ZITS Inpainting...")
+            print("Running ZITS++ Inpainting...")
             
-            # Save inputs locally
-            LATEST_IMAGE.save("temp_inpaint_input.png")
-            LATEST_MASK.save("temp_inpaint_mask.png")
-            
-            # Ensure ZITS is cloned and checkpoints are downloaded
+            # Ensure ZITS-PlusPlus repository and weights are downloaded
             download_zits_weights()
             
-            ckpt_dir = "ZITS_inpainting/ckpt/zits_places2"
+            # Clean up old temporary folders if any
+            import shutil
+            if os.path.exists("ZITS-PlusPlus/temp_inpaint_input"):
+                shutil.rmtree("ZITS-PlusPlus/temp_inpaint_input")
+            if os.path.exists("ZITS-PlusPlus/temp_inpaint_mask"):
+                shutil.rmtree("ZITS-PlusPlus/temp_inpaint_mask")
+            if os.path.exists("ZITS-PlusPlus/temp_inpaint_output"):
+                shutil.rmtree("ZITS-PlusPlus/temp_inpaint_output")
                 
-            # Run ZITS single image test via subprocess
+            os.makedirs("ZITS-PlusPlus/temp_inpaint_input", exist_ok=True)
+            os.makedirs("ZITS-PlusPlus/temp_inpaint_mask", exist_ok=True)
+            
+            # Save files with the same name so ZITS++ batch loader can pair them
+            LATEST_IMAGE.save("ZITS-PlusPlus/temp_inpaint_input/image.png")
+            LATEST_MASK.save("ZITS-PlusPlus/temp_inpaint_mask/image.png")
+            
+            # Run ZITS++ test script via subprocess with cwd="ZITS-PlusPlus"
             import subprocess
             cmd = [
-                "python", "ZITS_inpainting/single_image_test.py",
-                "--path", ckpt_dir,
-                "--config_file", "ZITS_inpainting/config/config_ZITS_places2.yml",
-                "--GPU_ids", "0" if DEVICE == "cuda" else "-1",
-                "--img_path", "temp_inpaint_input.png",
-                "--mask_path", "temp_inpaint_mask.png",
-                "--save_path", "temp_inpaint_output"
+                "python", "test.py",
+                "--config", "configs/config_zitspp.yml",
+                "--exp_name", "zitspp",
+                "--ckpt_resume", "ckpts/model_512/models/last.ckpt",
+                "--save_path", "./temp_inpaint_output",
+                "--img_dir", "temp_inpaint_input",
+                "--mask_dir", "temp_inpaint_mask",
+                "--wf_ckpt", "ckpts/best_lsm_hawp.pth",
+                "--use_ema",
+                "--test_size", "512",
+                "--object_removal"
             ]
             
-            print(f"Executing ZITS command: {' '.join(cmd)}")
-            result = subprocess.run(cmd, capture_output=True, text=True)
+            print(f"Executing ZITS++ command: {' '.join(cmd)}")
+            result = subprocess.run(cmd, cwd="ZITS-PlusPlus", capture_output=True, text=True)
             print(result.stdout)
             if result.stderr:
-                print("ZITS Error:", result.stderr)
+                print("ZITS++ Error:", result.stderr)
                 
-            # Find and load the generated output file
-            if os.path.exists("temp_inpaint_output"):
-                out_files = glob.glob("temp_inpaint_output/*")
-                if len(out_files) > 0:
-                    out_img = Image.open(out_files[0])
-                    return out_img, "Object successfully erased using ZITS Inpainting!"
-                    
-            return None, "ZITS ran but did not output a file. Make sure your model folder is configured correctly."
+            # Load result
+            out_img_path = "ZITS-PlusPlus/temp_inpaint_output/image.png"
+            if os.path.exists(out_img_path):
+                out_img = Image.open(out_img_path)
+                return out_img, "Object successfully erased using ZITS++ Inpainting!"
+                
+            return None, (
+                f"ZITS++ ran but did not output a file.\n\n"
+                f"Command stdout:\n{result.stdout}\n\n"
+                f"Command stderr:\n{result.stderr}"
+            )
             
     except Exception as e:
         import traceback

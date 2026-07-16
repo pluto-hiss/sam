@@ -9,3 +9,5 @@ triton
 diffusers
 accelerate
 yacs
+ruamel.yaml
+pytorch-lightning
