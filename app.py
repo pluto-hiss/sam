@@ -1,5 +1,6 @@
 import os
 import cv2
+import glob
 import gradio as gr
 import numpy as np
 import torch
@@ -15,11 +16,20 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 CACHED_IMAGE = None
 CACHED_STATE = None
 
+# Latest segmented mask and image for inpainting
+LATEST_IMAGE = None
+LATEST_MASK = None
+
+# Stable Diffusion Inpainting pipeline cache
+INPAINT_PIPE = None
+
 def clear_cache():
-    global CACHED_IMAGE, CACHED_STATE
+    global CACHED_IMAGE, CACHED_STATE, LATEST_IMAGE, LATEST_MASK
     CACHED_IMAGE = None
     CACHED_STATE = None
-    print("Inference state cache cleared.")
+    LATEST_IMAGE = None
+    LATEST_MASK = None
+    print("Inference state cache and latest mask cleared.")
 
 def init_model(load_source="community", hf_token=None):
     global MODEL, PROCESSOR
@@ -74,6 +84,19 @@ def init_model(load_source="community", hf_token=None):
             "2. If using the official source, you have valid Hugging Face access to facebook/sam3."
         )
 
+def get_inpaint_pipe():
+    global INPAINT_PIPE
+    if INPAINT_PIPE is None:
+        print("Loading Stable Diffusion Inpainting pipeline...")
+        from diffusers import StableDiffusionInpaintPipeline
+        
+        INPAINT_PIPE = StableDiffusionInpaintPipeline.from_pretrained(
+            "runwayml/stable-diffusion-inpainting",
+            torch_dtype=torch.float16 if DEVICE == "cuda" else torch.float32
+        )
+        INPAINT_PIPE.to(DEVICE)
+    return INPAINT_PIPE
+
 def visualize_results(pil_image, masks, boxes, scores, description_prefix, threshold=0.15):
     if masks is None or len(masks) == 0:
         return pil_image, f"No objects were detected."
@@ -94,6 +117,9 @@ def visualize_results(pil_image, masks, boxes, scores, description_prefix, thres
     info_text = f"Successfully detected instance(s) {description_prefix}:\n\n"
     valid_boxes = []
     
+    # Create combined binary mask for inpainting
+    binary_mask = np.zeros((h, w), dtype=np.uint8)
+    
     for idx, (mask, score) in enumerate(zip(masks, scores)):
         score_val = float(score.item()) if torch.is_tensor(score) else float(score)
         if score_val < threshold:
@@ -112,6 +138,7 @@ def visualize_results(pil_image, masks, boxes, scores, description_prefix, thres
             
         color = colors[idx % len(colors)]
         overlay[mask_np > 0] = color
+        binary_mask[mask_np > 0] = 255
         
         box_info = ""
         if boxes is not None and len(boxes) > idx:
@@ -126,6 +153,11 @@ def visualize_results(pil_image, masks, boxes, scores, description_prefix, thres
     if valid_instances == 0:
         return pil_image, f"No objects passed the confidence threshold of {threshold:.2f}."
         
+    # Save the latest image and binary mask globally for inpainting
+    global LATEST_IMAGE, LATEST_MASK
+    LATEST_IMAGE = pil_image
+    LATEST_MASK = Image.fromarray(binary_mask)
+    
     # Blend the color overlays with the original image
     alpha = 0.4
     blended = cv2.addWeighted(img_np, 1 - alpha, overlay, alpha, 0)
@@ -282,6 +314,12 @@ def interactive_click_segment(input_image, select_data: gr.SelectData):
         color = (0, 128, 255)
         overlay[mask_np > 0] = color
         
+        # Save the latest image and binary mask globally for inpainting
+        global LATEST_IMAGE, LATEST_MASK
+        LATEST_IMAGE = pil_image
+        binary_mask = ((mask_np > 0).astype(np.uint8) * 255)
+        LATEST_MASK = Image.fromarray(binary_mask)
+        
         alpha = 0.4
         blended = cv2.addWeighted(img_np, 1 - alpha, overlay, alpha, 0)
         
@@ -299,6 +337,99 @@ def interactive_click_segment(input_image, select_data: gr.SelectData):
         import traceback
         err_msg = traceback.format_exc()
         return None, f"Error running raw click prediction: {str(e)}\n\nDetails:\n{err_msg}"
+
+def inpaint_object(model_choice, prompt_text):
+    global LATEST_IMAGE, LATEST_MASK
+    if LATEST_IMAGE is None or LATEST_MASK is None:
+        return None, "Error: Please segment an object first using any of the tabs above."
+        
+    try:
+        if model_choice.startswith("latent-diffusion"):
+            if DEVICE == "cuda":
+                torch.cuda.empty_cache()
+                
+            print("Running Latent Diffusion Inpainting (Stable Diffusion)...")
+            pipe = get_inpaint_pipe()
+            
+            # Resize image and mask to be multiples of 8 for Stable Diffusion
+            w, h = LATEST_IMAGE.size
+            new_w = (w // 8) * 8
+            new_h = (h // 8) * 8
+            
+            input_img = LATEST_IMAGE.resize((new_w, new_h))
+            mask_img = LATEST_MASK.resize((new_w, new_h))
+            
+            with torch.no_grad():
+                if DEVICE == "cuda":
+                    with torch.autocast(device_type="cuda", dtype=torch.float16):
+                        output = pipe(
+                            prompt=prompt_text.strip(),
+                            image=input_img,
+                            mask_image=mask_img
+                        ).images[0]
+                else:
+                    output = pipe(
+                        prompt=prompt_text.strip(),
+                        image=input_img,
+                        mask_image=mask_img
+                    ).images[0]
+                    
+            output = output.resize((w, h))
+            return output, "Object successfully erased using Latent Diffusion!"
+            
+        elif model_choice.startswith("ZITS"):
+            print("Running ZITS Inpainting...")
+            
+            # Save inputs locally
+            LATEST_IMAGE.save("temp_inpaint_input.png")
+            LATEST_MASK.save("temp_inpaint_mask.png")
+            
+            # Clone ZITS_inpainting repository if not present
+            if not os.path.exists("ZITS_inpainting"):
+                print("Cloning DQiaole/ZITS_inpainting...")
+                import subprocess
+                subprocess.run(["git", "clone", "https://github.com/DQiaole/ZITS_inpainting.git"])
+                
+            # Set default checkpoint directories
+            ckpt_dir = "ZITS_inpainting/ckpt/zits_places2"
+            if not os.path.exists(ckpt_dir):
+                return None, (
+                    "ZITS repository cloned, but weights are missing. Please ensure you download "
+                    "the pre-trained model weights (Places2) and place them into ZITS_inpainting/ckpt/zits_places2/ "
+                    "before using this mode."
+                )
+                
+            # Run ZITS single image test via subprocess
+            import subprocess
+            cmd = [
+                "python", "ZITS_inpainting/single_image_test.py",
+                "--path", ckpt_dir,
+                "--config_file", "ZITS_inpainting/config/config_ZITS_places2.yml",
+                "--GPU_ids", "0" if DEVICE == "cuda" else "-1",
+                "--img_path", "temp_inpaint_input.png",
+                "--mask_path", "temp_inpaint_mask.png",
+                "--save_path", "temp_inpaint_output"
+            ]
+            
+            print(f"Executing ZITS command: {' '.join(cmd)}")
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            print(result.stdout)
+            if result.stderr:
+                print("ZITS Error:", result.stderr)
+                
+            # Find and load the generated output file
+            if os.path.exists("temp_inpaint_output"):
+                out_files = glob.glob("temp_inpaint_output/*")
+                if len(out_files) > 0:
+                    out_img = Image.open(out_files[0])
+                    return out_img, "Object successfully erased using ZITS Inpainting!"
+                    
+            return None, "ZITS ran but did not output a file. Make sure your model folder is configured correctly."
+            
+    except Exception as e:
+        import traceback
+        err_msg = traceback.format_exc()
+        return None, f"Error running inpainting: {str(e)}\n\nDetails:\n{err_msg}"
 
 # Auto-initialize model from community mirror on startup
 auto_load_status = ""
@@ -464,6 +595,42 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue", secondary_hue="indigo"))
                         inputs=[],
                         outputs=[]
                     )
+                    
+            # Add Inpainting Panel
+            gr.Markdown("---")
+            gr.Markdown("### 🧼 3. Erase/Inpaint Segmented Objects")
+            gr.Markdown(
+                "Once you have segmented an object in any tab above, you can erase it from the image using an inpainting model."
+            )
+            with gr.Row():
+                inpaint_model = gr.Dropdown(
+                    label="Inpainting Model",
+                    choices=["latent-diffusion (Stable Diffusion)", "ZITS (CVPR 2022)"],
+                    value="latent-diffusion (Stable Diffusion)",
+                    info="Select which inpainting model to use for erasing."
+                )
+                inpaint_prompt = gr.Textbox(
+                    label="Inpainting Prompt",
+                    placeholder="e.g. clean background, grass, wall",
+                    value="clean background",
+                    info="Used by Latent Diffusion to guide what should fill the erased space."
+                )
+                
+            inpaint_btn = gr.Button("🧼 Erase Segmented Object", variant="primary")
+            with gr.Row():
+                inpaint_output_img = gr.Image(label="Inpainted Output", type="pil", interactive=False)
+                inpaint_status = gr.Textbox(
+                    label="Inpaint Status",
+                    placeholder="Inpainting logs will appear here...",
+                    interactive=False,
+                    lines=3
+                )
+                
+            inpaint_btn.click(
+                fn=inpaint_object,
+                inputs=[inpaint_model, inpaint_prompt],
+                outputs=[inpaint_output_img, inpaint_status]
+            )
 
     # Show/hide token field depending on selected weight source
     def update_visibility(source):
@@ -490,6 +657,7 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue", secondary_hue="indigo"))
         2. **Raw Interactive Points:** Go to the **Raw Interactive Points** tab, upload an image, and click directly on the image to segment that item instantly!
         3. **Concept Prompting:** Upload an image, type a concept name, adjust the confidence slider, and click **Run Segmentation**.
         4. **Auto-Segment Everything:** Go to the **Auto-Segment Everything** tab, upload an image, and click **Auto-Segment Everything** to isolate all items.
+        5. **Erase Object:** After segmenting, scroll down to the **Erase/Inpaint Segmented Objects** section, select a model, and click **Erase Segmented Object**.
         """
     )
 

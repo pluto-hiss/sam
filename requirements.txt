@@ -6,3 +6,5 @@ opencv-python
 tqdm
 matplotlib
 triton
+diffusers
+accelerate
