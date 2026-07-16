@@ -16,3 +16,4 @@ trimesh
 omegaconf
 einops
 rembg
+PyMCubes
