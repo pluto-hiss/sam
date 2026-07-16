@@ -32,9 +32,7 @@ def main():
         
     # 2. Create Dummy Data
     print_banner("CREATING DUMMY TEST IMAGE AND MASK")
-    # A 256x256 solid red image
     dummy_img = Image.new("RGB", (256, 256), color=(255, 0, 0))
-    # A 256x256 binary mask with a 50x50 white square in the center
     dummy_mask = Image.new("L", (256, 256), color=0)
     for x in range(100, 150):
         for y in range(100, 150):
@@ -52,7 +50,6 @@ def main():
                 self.index = index
                 
         select_data = MockSelectData(index=[128, 128])
-        
         result_img, info = app.interactive_click_segment(dummy_img, select_data)
         if result_img is not None:
             print("✅ Raw click segment test succeeded!")

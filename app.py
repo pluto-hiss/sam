@@ -8,20 +8,20 @@ import torch
 from PIL import Image, ImageDraw
 from huggingface_hub import hf_hub_download
 
-# Global model state
+# Global model variables
 MODEL = None
 PROCESSOR = None
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-# Cached state to speed up consecutive clicks on the same image
+# Cached image state to speed up consecutive clicks on the same image
 CACHED_IMAGE = None
 CACHED_STATE = None
 
-# Latest segmented mask and image for 3D model generation
+# Latest segmented image and binary mask (updated by all segmentation modes)
 LATEST_IMAGE = None
 LATEST_MASK = None
 
-# TripoSR Model cache
+# TripoSR reconstruction model cache
 TSR_MODEL = None
 
 def clear_cache():
@@ -30,25 +30,23 @@ def clear_cache():
     CACHED_STATE = None
     LATEST_IMAGE = None
     LATEST_MASK = None
-    print("Inference state cache and latest mask cleared.")
+    print("Inference cache and latest mask cleared.")
 
 def init_model(load_source="community", hf_token=None):
     global MODEL, PROCESSOR
     if MODEL is not None:
-        return "SAM 3 Model already loaded!"
+        return "SAM 3 model already loaded!"
     
     try:
         from sam3.model_builder import build_sam3_image_model
         from sam3.model.sam3_image_processor import Sam3Processor
         
         checkpoint_path = None
-        
         if load_source == "community":
             print("Downloading SAM 3 weights from community mirror (1038lab/sam3)...")
             checkpoint_path = hf_hub_download(repo_id="1038lab/sam3", filename="sam3.pt")
             print(f"Weights downloaded to: {checkpoint_path}")
         else:
-            # Official Hugging Face gated repository
             if hf_token:
                 hf_token = hf_token.strip()
                 try:
@@ -59,7 +57,6 @@ def init_model(load_source="community", hf_token=None):
             print("Downloading SAM 3 weights from official repository (facebook/sam3)...")
             
         print(f"Building SAM 3 model on {DEVICE}...")
-        
         if checkpoint_path:
             MODEL = build_sam3_image_model(
                 checkpoint_path=checkpoint_path, 
@@ -77,19 +74,12 @@ def init_model(load_source="community", hf_token=None):
     except Exception as e:
         import traceback
         err_details = traceback.format_exc()
-        return (
-            f"Error loading SAM 3 model: {str(e)}\n\n"
-            f"Details:\n{err_details}\n\n"
-            "Please ensure:\n"
-            "1. You are running on a GPU instance if using CUDA.\n"
-            "2. If using the official source, you have valid Hugging Face access to facebook/sam3."
-        )
+        return f"Error loading SAM 3 model: {str(e)}\n\nDetails:\n{err_details}"
 
 def get_tsr_model():
     global TSR_MODEL
     if TSR_MODEL is None:
         print("Loading TripoSR model...")
-        # Add TripoSR repository to path if cloned
         triposr_path = os.path.abspath("TripoSR")
         if os.path.exists(triposr_path):
             sys.path.append(triposr_path)
@@ -107,25 +97,23 @@ def get_tsr_model():
 
 def visualize_results(pil_image, masks, boxes, scores, description_prefix, threshold=0.15):
     if masks is None or len(masks) == 0:
-        return pil_image, f"No objects were detected."
+        return pil_image, "No objects were detected."
         
     img_np = np.array(pil_image)
     h, w, c = img_np.shape
     overlay = np.zeros_like(img_np, dtype=np.uint8)
     
-    # Visual color palette
     colors = [
         (255, 0, 0), (0, 255, 0), (0, 0, 255),
         (255, 255, 0), (255, 0, 255), (0, 255, 255),
-        (255, 128, 0), (128, 0, 255), (0, 255, 128),
-        (255, 0, 127), (127, 255, 0), (0, 127, 255)
+        (255, 128, 0), (128, 0, 255), (0, 255, 128)
     ]
     
     valid_instances = 0
-    info_text = f"Successfully detected instance(s) {description_prefix}:\n\n"
+    info_text = f"Detected instances {description_prefix}:\n\n"
     valid_boxes = []
     
-    # Create combined binary mask for 3D model generation
+    # Combined binary mask for 3D generation
     binary_mask = np.zeros((h, w), dtype=np.uint8)
     
     for idx, (mask, score) in enumerate(zip(masks, scores)):
@@ -134,13 +122,7 @@ def visualize_results(pil_image, masks, boxes, scores, description_prefix, thres
             continue
             
         valid_instances += 1
-        
-        # Convert mask to numpy bool mask
-        if torch.is_tensor(mask):
-            mask_np = mask.cpu().numpy()
-        else:
-            mask_np = np.array(mask)
-            
+        mask_np = mask.cpu().numpy() if torch.is_tensor(mask) else np.array(mask)
         if len(mask_np.shape) == 3:
             mask_np = mask_np.squeeze(0)
             
@@ -150,35 +132,31 @@ def visualize_results(pil_image, masks, boxes, scores, description_prefix, thres
         
         box_info = ""
         if boxes is not None and len(boxes) > idx:
-            box = boxes[idx]
-            if torch.is_tensor(box):
-                box = box.cpu().numpy()
+            box = boxes[idx].cpu().numpy() if torch.is_tensor(boxes[idx]) else np.array(boxes[idx])
             valid_boxes.append((box, color, valid_instances))
             box_info = f", Box: [x1={int(box[0])}, y1={int(box[1])}, x2={int(box[2])}, y2={int(box[3])}]"
             
-        info_text += f"• Instance {valid_instances}: Confidence Score: {score_val:.3f}{box_info}\n"
+        info_text += f"• Instance {valid_instances}: Confidence: {score_val:.3f}{box_info}\n"
         
     if valid_instances == 0:
-        return pil_image, f"No objects passed the confidence threshold of {threshold:.2f}."
+        return pil_image, f"No objects passed threshold of {threshold:.2f}."
         
-    # Save the latest image and binary mask globally for 3D generation
+    # Cache segmented elements
     global LATEST_IMAGE, LATEST_MASK
     LATEST_IMAGE = pil_image
     LATEST_MASK = Image.fromarray(binary_mask)
     
-    # Blend the color overlays with the original image
+    # Blend color overlays
     alpha = 0.4
     blended = cv2.addWeighted(img_np, 1 - alpha, overlay, alpha, 0)
     
-    # Draw bounding boxes and text labels on the image
     result_pil = Image.fromarray(blended)
     draw = ImageDraw.Draw(result_pil)
-    
     for box, color, inst_id in valid_boxes:
         draw.rectangle([box[0], box[1], box[2], box[3]], outline=color, width=3)
         draw.text((box[0] + 5, box[1] + 5), f"#{inst_id}", fill=(255, 255, 255))
         
-    info_text = f"Found {valid_instances} valid instance(s) above threshold.\n\n" + info_text
+    info_text = f"Found {valid_instances} valid instances above threshold.\n\n" + info_text
     return result_pil, info_text
 
 def run_inference(input_image, prompt_text, threshold):
@@ -193,13 +171,11 @@ def run_inference(input_image, prompt_text, threshold):
         return None, "Error: Please enter a prompt."
         
     try:
-        # Convert input_image to PIL if it's a numpy array
         if isinstance(input_image, np.ndarray):
             pil_image = Image.fromarray(cv2.cvtColor(input_image, cv2.COLOR_BGR2RGB))
         else:
             pil_image = input_image
             
-        # Run inference
         with torch.no_grad():
             if DEVICE == "cuda":
                 with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
@@ -221,7 +197,6 @@ def run_inference(input_image, prompt_text, threshold):
             description_prefix=f"matching '{prompt_text}'", 
             threshold=threshold
         )
-        
     except Exception as e:
         import traceback
         err_msg = traceback.format_exc()
@@ -236,20 +211,17 @@ def interactive_click_segment(input_image, select_data: gr.SelectData):
         return None, "Error: Please upload or select an image."
         
     try:
-        # Convert input_image to PIL if it's a numpy array
         if isinstance(input_image, np.ndarray):
             pil_image = Image.fromarray(cv2.cvtColor(input_image, cv2.COLOR_BGR2RGB))
         else:
             pil_image = input_image
             
         x, y = select_data.index
-        print(f"User clicked at coordinates: col (x)={x}, row (y)={y}")
+        print(f"User clicked coordinates: x={x}, y={y}")
         
-        # Check if we can reuse the cached image state
         is_same_image = False
         if CACHED_IMAGE is not None and CACHED_STATE is not None:
             if CACHED_IMAGE.size == pil_image.size:
-                # Fast downsampled pixel check to see if the image is identical
                 arr_cached = np.array(CACHED_IMAGE.resize((32, 32)))
                 arr_current = np.array(pil_image.resize((32, 32)))
                 diff = np.mean(np.abs(arr_cached - arr_current))
@@ -266,11 +238,9 @@ def interactive_click_segment(input_image, select_data: gr.SelectData):
                     else:
                         print("Using cached image state.")
                         
-                    # Build point coordinates and label tensors
                     point_coords = np.array([[x, y]], dtype=np.float32)
                     point_labels = np.array([1], dtype=np.int32)
                     
-                    # Predict raw instances
                     masks, scores, logits = MODEL.predict_inst(
                         CACHED_STATE,
                         point_coords=point_coords,
@@ -297,11 +267,9 @@ def interactive_click_segment(input_image, select_data: gr.SelectData):
                     multimask_output=True
                 )
                 
-        # Draw mask and click dot
         if masks is None or len(masks) == 0:
             return pil_image, "No masks returned for this click point."
             
-        # Select best candidate mask based on confidence score
         best_idx = torch.argmax(scores) if torch.is_tensor(scores) else np.argmax(scores)
         best_mask = masks[best_idx]
         best_score = scores[best_idx]
@@ -309,20 +277,13 @@ def interactive_click_segment(input_image, select_data: gr.SelectData):
         
         img_np = np.array(pil_image)
         overlay = np.zeros_like(img_np, dtype=np.uint8)
-        
-        if torch.is_tensor(best_mask):
-            mask_np = best_mask.cpu().numpy()
-        else:
-            mask_np = np.array(best_mask)
-            
+        mask_np = best_mask.cpu().numpy() if torch.is_tensor(best_mask) else np.array(best_mask)
         if len(mask_np.shape) == 3:
             mask_np = mask_np.squeeze(0)
             
-        # Draw mask overlay in blue
         color = (0, 128, 255)
         overlay[mask_np > 0] = color
         
-        # Save the latest image and binary mask globally for 3D generation
         global LATEST_IMAGE, LATEST_MASK
         LATEST_IMAGE = pil_image
         binary_mask = ((mask_np > 0).astype(np.uint8) * 255)
@@ -333,14 +294,11 @@ def interactive_click_segment(input_image, select_data: gr.SelectData):
         
         result_pil = Image.fromarray(blended)
         draw = ImageDraw.Draw(result_pil)
-        
-        # Draw a green dot at the click coordinates
         dot_radius = 5
         draw.ellipse([x - dot_radius, y - dot_radius, x + dot_radius, y + dot_radius], fill=(0, 255, 0), outline=(255, 255, 255), width=2)
         
         info_text = f"Segmented object at coordinates ({x}, {y}):\n\n• Best Mask Confidence Score: {best_score_val:.3f}"
         return result_pil, info_text
-        
     except Exception as e:
         import traceback
         err_msg = traceback.format_exc()
@@ -352,7 +310,6 @@ def generate_3d_model():
         return None, "Error: Please segment an object first using any of the tabs above."
         
     try:
-        # Lazy load TripoSR model
         tsr_model = get_tsr_model()
         from tsr.utils import resize_foreground
         
@@ -360,14 +317,14 @@ def generate_3d_model():
         img_np = np.array(LATEST_IMAGE.convert("RGB"))
         mask_np = np.array(LATEST_MASK.convert("L"))
         
-        # Create an RGBA image where background is transparent
+        # Create transparent RGBA image
         h, w = mask_np.shape
         rgba = np.zeros((h, w, 4), dtype=np.uint8)
         rgba[:, :, :3] = img_np
         rgba[:, :, 3] = mask_np
         rgba_pil = Image.fromarray(rgba)
         
-        # Resize foreground to match TripoSR's expectations (ratio=0.85)
+        # Resize foreground
         processed_img = resize_foreground(rgba_pil, ratio=0.85)
         
         print("Running TripoSR 3D reconstruction...")
@@ -386,7 +343,6 @@ def generate_3d_model():
         print("3D Model exported successfully!")
         
         return output_path, "3D Model generated successfully in under a second! You can interact with it in the viewer and download the .obj file."
-        
     except Exception as e:
         import traceback
         err_msg = traceback.format_exc()
@@ -402,7 +358,7 @@ except Exception as e:
     auto_load_status = f"Auto-initialization failed: {str(e)}. Please try manual loading below."
     print(auto_load_status)
 
-# Build Gradio UI
+# Build Gradio Blocks
 with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue", secondary_hue="indigo")) as demo:
     gr.Markdown(
         """
@@ -439,7 +395,6 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue", secondary_hue="indigo"))
         with gr.Column(scale=2):
             gr.Markdown("### 🖼️ 2. Inference Options")
             
-            # Setup Tabs for different modes
             with gr.Tabs():
                 with gr.TabItem("Raw Interactive Points"):
                     gr.Markdown(
@@ -554,7 +509,7 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue", secondary_hue="indigo"))
                         outputs=[]
                     )
                     
-            # Add 3D Generation Panel
+            # Generate 3D Model Panel
             gr.Markdown("---")
             gr.Markdown("### 🔮 3. Generate 3D Model")
             gr.Markdown(
@@ -605,5 +560,4 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue", secondary_hue="indigo"))
     )
 
 if __name__ == "__main__":
-    # Launch server with share=True to generate the public hotlink webpage
     demo.launch(share=True, debug=True)
