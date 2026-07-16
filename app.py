@@ -1,6 +1,7 @@
 import os
 import cv2
 import glob
+import sys
 import gradio as gr
 import numpy as np
 import torch
@@ -16,12 +17,12 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 CACHED_IMAGE = None
 CACHED_STATE = None
 
-# Latest segmented mask and image for inpainting
+# Latest segmented mask and image for 3D model generation
 LATEST_IMAGE = None
 LATEST_MASK = None
 
-# Stable Diffusion Inpainting pipeline cache
-INPAINT_PIPE = None
+# TripoSR Model cache
+TSR_MODEL = None
 
 def clear_cache():
     global CACHED_IMAGE, CACHED_STATE, LATEST_IMAGE, LATEST_MASK
@@ -84,18 +85,25 @@ def init_model(load_source="community", hf_token=None):
             "2. If using the official source, you have valid Hugging Face access to facebook/sam3."
         )
 
-def get_inpaint_pipe():
-    global INPAINT_PIPE
-    if INPAINT_PIPE is None:
-        print("Loading Stable Diffusion Inpainting pipeline...")
-        from diffusers import StableDiffusionInpaintPipeline
-        
-        INPAINT_PIPE = StableDiffusionInpaintPipeline.from_pretrained(
-            "runwayml/stable-diffusion-inpainting",
-            torch_dtype=torch.float16 if DEVICE == "cuda" else torch.float32
+def get_tsr_model():
+    global TSR_MODEL
+    if TSR_MODEL is None:
+        print("Loading TripoSR model...")
+        # Add TripoSR repository to path if cloned
+        triposr_path = os.path.abspath("TripoSR")
+        if os.path.exists(triposr_path):
+            sys.path.append(triposr_path)
+            
+        from tsr.system import TSR
+        TSR_MODEL = TSR.from_pretrained(
+            "stabilityai/TripoSR",
+            config_name="config.yaml",
+            weight_name="model.ckpt"
         )
-        INPAINT_PIPE.to(DEVICE)
-    return INPAINT_PIPE
+        TSR_MODEL.to(DEVICE)
+        TSR_MODEL.eval()
+        print("TripoSR model loaded successfully!")
+    return TSR_MODEL
 
 def visualize_results(pil_image, masks, boxes, scores, description_prefix, threshold=0.15):
     if masks is None or len(masks) == 0:
@@ -117,7 +125,7 @@ def visualize_results(pil_image, masks, boxes, scores, description_prefix, thres
     info_text = f"Successfully detected instance(s) {description_prefix}:\n\n"
     valid_boxes = []
     
-    # Create combined binary mask for inpainting
+    # Create combined binary mask for 3D model generation
     binary_mask = np.zeros((h, w), dtype=np.uint8)
     
     for idx, (mask, score) in enumerate(zip(masks, scores)):
@@ -153,7 +161,7 @@ def visualize_results(pil_image, masks, boxes, scores, description_prefix, thres
     if valid_instances == 0:
         return pil_image, f"No objects passed the confidence threshold of {threshold:.2f}."
         
-    # Save the latest image and binary mask globally for inpainting
+    # Save the latest image and binary mask globally for 3D generation
     global LATEST_IMAGE, LATEST_MASK
     LATEST_IMAGE = pil_image
     LATEST_MASK = Image.fromarray(binary_mask)
@@ -314,7 +322,7 @@ def interactive_click_segment(input_image, select_data: gr.SelectData):
         color = (0, 128, 255)
         overlay[mask_np > 0] = color
         
-        # Save the latest image and binary mask globally for inpainting
+        # Save the latest image and binary mask globally for 3D generation
         global LATEST_IMAGE, LATEST_MASK
         LATEST_IMAGE = pil_image
         binary_mask = ((mask_np > 0).astype(np.uint8) * 255)
@@ -338,175 +346,51 @@ def interactive_click_segment(input_image, select_data: gr.SelectData):
         err_msg = traceback.format_exc()
         return None, f"Error running raw click prediction: {str(e)}\n\nDetails:\n{err_msg}"
 
-def patch_zits_nms():
-    nms_path = "ZITS-PlusPlus/trainers/nms_temp.py"
-    if os.path.exists(nms_path):
-        with open(nms_path, "r") as f:
-            content = f.read()
-            
-        if 'cdll.LoadLibrary(' in content and 'try:' not in content:
-            print("Patching ZITS++ nms_temp.py to handle ctypes load failure...")
-            target = 'solver = cdll.LoadLibrary("/home/wmlce/dql_inpainting/CNN_final/src/cxx/lib/solve_csa.so")'
-            replacement = """try:
-    import os
-    local_so_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../src/cxx/lib/solve_csa.so"))
-    if os.path.exists(local_so_path):
-        solver = cdll.LoadLibrary(local_so_path)
-    else:
-        solver = cdll.LoadLibrary("/home/wmlce/dql_inpainting/CNN_final/src/cxx/lib/solve_csa.so")
-except Exception as e:
-    print("Warning: Failed to load solve_csa.so, using dummy solver fallback.", e)
-    class DummySolver:
-        def solve_csa(self, *args, **kwargs):
-            return 0
-    solver = DummySolver()"""
-            
-            patched_content = content.replace(target, replacement)
-            with open(nms_path, "w") as f:
-                f.write(patched_content)
-            print("ZITS++ nms_temp.py patched successfully!")
-
-def download_zits_weights():
-    # 1. Ensure ZITS-PlusPlus folder is cloned
-    if not os.path.exists("ZITS-PlusPlus"):
-        print("Cloning ZITS-PlusPlus repository...")
-        import subprocess
-        subprocess.run(["git", "clone", "https://github.com/ewrfcas/ZITS-PlusPlus.git"])
-        
-    # Patch nms_temp.py to handle the ctypes load failure of solve_csa.so
-    patch_zits_nms()
-        
-    # 2. Check if best_lsm_hawp.pth is downloaded
-    ckpts_dir = "ZITS-PlusPlus/ckpts"
-    os.makedirs(ckpts_dir, exist_ok=True)
-    
-    hawp_path = os.path.join(ckpts_dir, "best_lsm_hawp.pth")
-    if not os.path.exists(hawp_path):
-        print("Downloading best_lsm_hawp.pth from Hugging Face...")
-        downloaded_file = hf_hub_download(
-            repo_id="jingwei-xu-00/pretrained_backup_for_streetunveiler",
-            subfolder="ZITS++",
-            filename="best_lsm_hawp.pth"
-        )
-        import shutil
-        shutil.copy(downloaded_file, hawp_path)
-        print("Downloaded and copied best_lsm_hawp.pth!")
-        
-    # 3. Check if places2 transformer model is downloaded and extracted
-    model_dir = os.path.join(ckpts_dir, "model_512")
-    if not os.path.exists(model_dir) or not os.path.exists(os.path.join(model_dir, "models/last.ckpt")):
-        print("Downloading model_512.zip from Hugging Face...")
-        downloaded_zip = hf_hub_download(
-            repo_id="jingwei-xu-00/pretrained_backup_for_streetunveiler",
-            subfolder="ZITS++",
-            filename="model_512.zip"
-        )
-        # Unzip directly into ZITS-PlusPlus/ckpts
-        import zipfile
-        print(f"Extracting {downloaded_zip} to {ckpts_dir}...")
-        with zipfile.ZipFile(downloaded_zip, 'r') as zip_ref:
-            zip_ref.extractall(ckpts_dir)
-        print("Extracted model_512!")
-
-def inpaint_object(model_choice, prompt_text):
+def generate_3d_model():
     global LATEST_IMAGE, LATEST_MASK
     if LATEST_IMAGE is None or LATEST_MASK is None:
         return None, "Error: Please segment an object first using any of the tabs above."
         
     try:
-        if model_choice.startswith("latent-diffusion"):
+        # Lazy load TripoSR model
+        tsr_model = get_tsr_model()
+        from tsr.utils import resize_foreground
+        
+        print("Preprocessing image using SAM 3 mask...")
+        img_np = np.array(LATEST_IMAGE.convert("RGB"))
+        mask_np = np.array(LATEST_MASK.convert("L"))
+        
+        # Create an RGBA image where background is transparent
+        h, w = mask_np.shape
+        rgba = np.zeros((h, w, 4), dtype=np.uint8)
+        rgba[:, :, :3] = img_np
+        rgba[:, :, 3] = mask_np
+        rgba_pil = Image.fromarray(rgba)
+        
+        # Resize foreground to match TripoSR's expectations (ratio=0.85)
+        processed_img = resize_foreground(rgba_pil, ratio=0.85)
+        
+        print("Running TripoSR 3D reconstruction...")
+        with torch.no_grad():
             if DEVICE == "cuda":
-                torch.cuda.empty_cache()
+                with torch.autocast(device_type="cuda", dtype=torch.float16):
+                    scene_codes = tsr_model([processed_img], device=DEVICE)
+                    meshes = tsr_model.extract_mesh(scene_codes, resolution=256)
+            else:
+                scene_codes = tsr_model([processed_img], device=DEVICE)
+                meshes = tsr_model.extract_mesh(scene_codes, resolution=256)
                 
-            print("Running Latent Diffusion Inpainting (Stable Diffusion)...")
-            pipe = get_inpaint_pipe()
-            
-            # Resize image and mask to be multiples of 8 for Stable Diffusion
-            w, h = LATEST_IMAGE.size
-            new_w = (w // 8) * 8
-            new_h = (h // 8) * 8
-            
-            input_img = LATEST_IMAGE.resize((new_w, new_h))
-            mask_img = LATEST_MASK.resize((new_w, new_h))
-            
-            with torch.no_grad():
-                if DEVICE == "cuda":
-                    with torch.autocast(device_type="cuda", dtype=torch.float16):
-                        output = pipe(
-                            prompt=prompt_text.strip(),
-                            image=input_img,
-                            mask_image=mask_img
-                        ).images[0]
-                else:
-                    output = pipe(
-                        prompt=prompt_text.strip(),
-                        image=input_img,
-                        mask_image=mask_img
-                    ).images[0]
-                    
-            output = output.resize((w, h))
-            return output, "Object successfully erased using Latent Diffusion!"
-            
-        elif model_choice.startswith("ZITS"):
-            print("Running ZITS++ Inpainting...")
-            
-            # Ensure ZITS-PlusPlus repository and weights are downloaded
-            download_zits_weights()
-            
-            # Clean up old temporary folders if any
-            import shutil
-            if os.path.exists("ZITS-PlusPlus/temp_inpaint_input"):
-                shutil.rmtree("ZITS-PlusPlus/temp_inpaint_input")
-            if os.path.exists("ZITS-PlusPlus/temp_inpaint_mask"):
-                shutil.rmtree("ZITS-PlusPlus/temp_inpaint_mask")
-            if os.path.exists("ZITS-PlusPlus/temp_inpaint_output"):
-                shutil.rmtree("ZITS-PlusPlus/temp_inpaint_output")
-                
-            os.makedirs("ZITS-PlusPlus/temp_inpaint_input", exist_ok=True)
-            os.makedirs("ZITS-PlusPlus/temp_inpaint_mask", exist_ok=True)
-            
-            # Save files with the same name so ZITS++ batch loader can pair them
-            LATEST_IMAGE.save("ZITS-PlusPlus/temp_inpaint_input/image.png")
-            LATEST_MASK.save("ZITS-PlusPlus/temp_inpaint_mask/image.png")
-            
-            # Run ZITS++ test script via subprocess with cwd="ZITS-PlusPlus"
-            import subprocess
-            cmd = [
-                "python", "test.py",
-                "--config", "configs/config_zitspp.yml",
-                "--exp_name", "zitspp",
-                "--ckpt_resume", "ckpts/model_512/models/last.ckpt",
-                "--save_path", "./temp_inpaint_output",
-                "--img_dir", "temp_inpaint_input",
-                "--mask_dir", "temp_inpaint_mask",
-                "--wf_ckpt", "ckpts/best_lsm_hawp.pth",
-                "--use_ema",
-                "--test_size", "512",
-                "--object_removal"
-            ]
-            
-            print(f"Executing ZITS++ command: {' '.join(cmd)}")
-            result = subprocess.run(cmd, cwd="ZITS-PlusPlus", capture_output=True, text=True)
-            print(result.stdout)
-            if result.stderr:
-                print("ZITS++ Error:", result.stderr)
-                
-            # Load result
-            out_img_path = "ZITS-PlusPlus/temp_inpaint_output/image.png"
-            if os.path.exists(out_img_path):
-                out_img = Image.open(out_img_path)
-                return out_img, "Object successfully erased using ZITS++ Inpainting!"
-                
-            return None, (
-                f"ZITS++ ran but did not output a file.\n\n"
-                f"Command stdout:\n{result.stdout}\n\n"
-                f"Command stderr:\n{result.stderr}"
-            )
-            
+        output_path = "output_3d_model.obj"
+        print(f"Exporting 3D model to {output_path}...")
+        meshes[0].export(output_path)
+        print("3D Model exported successfully!")
+        
+        return output_path, "3D Model generated successfully in under a second! You can interact with it in the viewer and download the .obj file."
+        
     except Exception as e:
         import traceback
         err_msg = traceback.format_exc()
-        return None, f"Error running inpainting: {str(e)}\n\nDetails:\n{err_msg}"
+        return None, f"Error generating 3D model: {str(e)}\n\nDetails:\n{err_msg}"
 
 # Auto-initialize model from community mirror on startup
 auto_load_status = ""
@@ -522,9 +406,9 @@ except Exception as e:
 with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue", secondary_hue="indigo")) as demo:
     gr.Markdown(
         """
-        # 🎨 Meta Segment Anything Model 3 (SAM 3) Demo
-        Welcome to the **SAM 3** interactive web application! 
-        SAM 3 introduces **Promptable Concept Segmentation (PCS)** alongside native geometric point-based prediction.
+        # 🎨 Meta SAM 3 to 3D Model Generator
+        Welcome to the **SAM to 3D** interactive web application! 
+        This app uses **SAM 3** to isolate the object of interest and **TripoSR** to instantly construct a 3D model of it.
         """
     )
     
@@ -565,7 +449,6 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue", secondary_hue="indigo"))
                         """
                     )
                     with gr.Row():
-                        # Set interactive=True to enable click selection events
                         raw_input_img = gr.Image(label="Input Image (Click here!)", type="pil", interactive=True)
                         raw_output_img = gr.Image(label="Segmented Output", type="pil", interactive=False)
                     
@@ -576,14 +459,12 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue", secondary_hue="indigo"))
                         lines=3
                     )
                     
-                    # Bind coordinates select click
                     raw_input_img.select(
                         fn=interactive_click_segment,
                         inputs=[raw_input_img],
                         outputs=[raw_output_img, raw_detection_info]
                     )
                     
-                    # Clear cache when image is changed
                     raw_input_img.change(
                         fn=clear_cache,
                         inputs=[],
@@ -673,40 +554,26 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue", secondary_hue="indigo"))
                         outputs=[]
                     )
                     
-            # Add Inpainting Panel
+            # Add 3D Generation Panel
             gr.Markdown("---")
-            gr.Markdown("### 🧼 3. Erase/Inpaint Segmented Objects")
+            gr.Markdown("### 🔮 3. Generate 3D Model")
             gr.Markdown(
-                "Once you have segmented an object in any tab above, you can erase it from the image using an inpainting model."
+                "Once you have segmented an object in any tab above, you can generate a 3D model of it using TripoSR."
             )
+            generate_3d_btn = gr.Button("🔮 Generate 3D Model", variant="primary")
             with gr.Row():
-                inpaint_model = gr.Dropdown(
-                    label="Inpainting Model",
-                    choices=["latent-diffusion (Stable Diffusion)", "ZITS (CVPR 2022)"],
-                    value="latent-diffusion (Stable Diffusion)",
-                    info="Select which inpainting model to use for erasing."
-                )
-                inpaint_prompt = gr.Textbox(
-                    label="Inpainting Prompt",
-                    placeholder="e.g. clean background, grass, wall",
-                    value="clean background",
-                    info="Used by Latent Diffusion to guide what should fill the erased space."
-                )
-                
-            inpaint_btn = gr.Button("🧼 Erase Segmented Object", variant="primary")
-            with gr.Row():
-                inpaint_output_img = gr.Image(label="Inpainted Output", type="pil", interactive=False)
-                inpaint_status = gr.Textbox(
-                    label="Inpaint Status",
-                    placeholder="Inpainting logs will appear here...",
+                model_3d_viewer = gr.Model3D(label="3D Model Viewer (.obj)", interactive=False)
+                generation_3d_status = gr.Textbox(
+                    label="3D Model Status",
+                    placeholder="3D generation logs will appear here...",
                     interactive=False,
                     lines=3
                 )
                 
-            inpaint_btn.click(
-                fn=inpaint_object,
-                inputs=[inpaint_model, inpaint_prompt],
-                outputs=[inpaint_output_img, inpaint_status]
+            generate_3d_btn.click(
+                fn=generate_3d_model,
+                inputs=[],
+                outputs=[model_3d_viewer, generation_3d_status]
             )
 
     # Show/hide token field depending on selected weight source
@@ -731,10 +598,9 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue", secondary_hue="indigo"))
         ---
         ### 📖 Quick Guide
         1. **Check Status:** Check the **Model Status** box. By default, the app automatically loads the weights from the public mirror on start.
-        2. **Raw Interactive Points:** Go to the **Raw Interactive Points** tab, upload an image, and click directly on the image to segment that item instantly!
-        3. **Concept Prompting:** Upload an image, type a concept name, adjust the confidence slider, and click **Run Segmentation**.
-        4. **Auto-Segment Everything:** Go to the **Auto-Segment Everything** tab, upload an image, and click **Auto-Segment Everything** to isolate all items.
-        5. **Erase Object:** After segmenting, scroll down to the **Erase/Inpaint Segmented Objects** section, select a model, and click **Erase Segmented Object**.
+        2. **Segment Object:** Go to any of the segmentation tabs above (Raw Points, Concept, or Auto-Segment) and segment the object you want to turn into 3D.
+        3. **Generate 3D Model:** Scroll down to the **Generate 3D Model** section and click **Generate 3D Model**.
+        4. **Interact & Download:** Once generated, look at the 3D model in the viewer, rotate/zoom it, and click to download the `.obj` file!
         """
     )
 

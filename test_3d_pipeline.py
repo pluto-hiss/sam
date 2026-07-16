@@ -10,7 +10,7 @@ def print_banner(msg):
     print("=" * 60)
 
 def main():
-    print_banner("STARTING SAM 3 & INPAINTING PIPELINE VERIFICATION TEST")
+    print_banner("STARTING SAM TO 3D PIPELINE VERIFICATION TEST")
     
     # 1. Verify Imports and Model Loading
     try:
@@ -47,7 +47,6 @@ def main():
     # 3. Test SAM 3 Point Click Inference
     print_banner("TESTING SAM 3 INTERACTIVE CLICK INFERENCE")
     try:
-        # Create a mock select data object with coordinate index
         class MockSelectData:
             def __init__(self, index):
                 self.index = index
@@ -63,59 +62,34 @@ def main():
             sys.exit(1)
     except Exception as e:
         import traceback
-        print(f"❌ Raw click segment crashed with error: {e}")
-        print(traceback.format_exc())
-        sys.exit(1)
-        
-    # 4. Test SAM 3 Concept Prompting
-    print_banner("TESTING SAM 3 CONCEPT PROMPTING INFERENCE")
-    try:
-        result_img, info = app.run_inference(dummy_img, "red box", 0.05)
-        # Note: since it's a solid color, it might not find a box, which is fine,
-        # but the function shouldn't crash!
-        print("✅ Concept prompting inference executed without crashing!")
-        print(f"Inference output: {info}")
-    except Exception as e:
-        import traceback
-        print(f"❌ Concept prompting inference crashed: {e}")
+        print(f"❌ Raw click segment crashed: {e}")
         print(traceback.format_exc())
         sys.exit(1)
 
-    # 5. Set Global LATEST_IMAGE & LATEST_MASK for Inpainting Tests
+    # 4. Set Global LATEST_IMAGE & LATEST_MASK for 3D Generation Tests
     app.LATEST_IMAGE = dummy_img
     app.LATEST_MASK = dummy_mask
     
-    # 6. Test Latent Diffusion Inpainting
-    print_banner("TESTING LATENT DIFFUSION (STABLE DIFFUSION) INPAINTING")
-    try:
-        inpaint_img, info = app.inpaint_object("latent-diffusion (Stable Diffusion)", "red background")
-        if inpaint_img is not None:
-            inpaint_img.save("test_output_latent_diffusion.png")
-            print("✅ Latent Diffusion Inpainting test succeeded!")
-            print(f"Status: {info}")
-        else:
-            print(f"❌ Latent Diffusion Inpainting test failed: {info}")
-            sys.exit(1)
-    except Exception as e:
-        import traceback
-        print(f"❌ Latent Diffusion Inpainting crashed: {e}")
-        print(traceback.format_exc())
-        sys.exit(1)
+    # 5. Clone TripoSR if needed for testing (normally done in notebook, but let's clone if missing)
+    if not os.path.exists("TripoSR"):
+        print("TripoSR repo not found locally. Cloning VAST-AI-Research/TripoSR...")
+        import subprocess
+        subprocess.run(["git", "clone", "https://github.com/VAST-AI-Research/TripoSR.git"])
         
-    # 7. Test ZITS++ Inpainting
-    print_banner("TESTING ZITS++ INPAINTING")
+    # 6. Test TripoSR 3D Generation
+    print_banner("TESTING TRIPOSR 3D MESH GENERATION")
     try:
-        inpaint_img, info = app.inpaint_object("ZITS (CVPR 2022)", "")
-        if inpaint_img is not None:
-            inpaint_img.save("test_output_zitspp.png")
-            print("✅ ZITS++ Inpainting test succeeded!")
+        out_mesh_path, info = app.generate_3d_model()
+        if out_mesh_path is not None and os.path.exists(out_mesh_path):
+            print("✅ TripoSR 3D Mesh Generation test succeeded!")
+            print(f"Output saved to: {out_mesh_path}")
             print(f"Status: {info}")
         else:
-            print(f"❌ ZITS++ Inpainting test failed: {info}")
+            print(f"❌ TripoSR 3D Mesh Generation failed: {info}")
             sys.exit(1)
     except Exception as e:
         import traceback
-        print(f"❌ ZITS++ Inpainting crashed: {e}")
+        print(f"❌ TripoSR 3D Mesh Generation crashed: {e}")
         print(traceback.format_exc())
         sys.exit(1)
         

@@ -12,3 +12,8 @@ yacs
 ruamel.yaml
 pytorch-lightning
 lpips
+trimesh
+omegaconf
+einops
+torchmcubes
+rembg
