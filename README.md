@@ -24,7 +24,7 @@ git add .
 git commit -m "Initialize SAM 3 Colab project"
 
 # Create a repository on GitHub, then add your remote and push:
-git remote add origin https://github.com/YOUR_GITHUB_USERNAME/YOUR_REPO_NAME.git
+git remote add origin https://github.com/pluto-hiss/sam.git
 git branch -M main
 git push -u origin main
 ```
@@ -34,7 +34,7 @@ git push -u origin main
 2. **Enable GPU:** Go to **Runtime > Change runtime type** in the Colab menu and select **T4 GPU** (or any available GPU).
 3. Update the `GIT_REPO_URL` variable in **Step 1** of the notebook to match your GitHub repository URL:
    ```python
-   GIT_REPO_URL = "https://github.com/YOUR_GITHUB_USERNAME/YOUR_REPO_NAME.git"
+   GIT_REPO_URL = "https://github.com/pluto-hiss/sam.git"
    ```
 4. Run the cells in order:
    - **Step 1:** Clones your GitHub repository and sets the working directory.
