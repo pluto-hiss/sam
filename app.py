@@ -348,27 +348,29 @@ def download_zits_weights():
     # 2. Check if best_lsm_hawp.pth is downloaded
     hawp_path = "ZITS_inpainting/ckpt/best_lsm_hawp.pth"
     if not os.path.exists(hawp_path):
-        print("Downloading best_lsm_hawp.pth...")
+        print("Downloading best_lsm_hawp.pth from Hugging Face...")
         os.makedirs(os.path.dirname(hawp_path), exist_ok=True)
-        import urllib.request
-        urllib.request.urlretrieve(
-            "https://huggingface.co/nguyenthanhtrung/LaMa_ZITS_cp/resolve/main/best_lsm_hawp.pth",
-            hawp_path
+        downloaded_file = hf_hub_download(
+            repo_id="nguyenthanhtrung/LaMa_ZITS_cp", 
+            filename="best_lsm_hawp.pth"
         )
-        print("Downloaded best_lsm_hawp.pth!")
+        import shutil
+        shutil.copy(downloaded_file, hawp_path)
+        print("Downloaded and copied best_lsm_hawp.pth!")
         
     # 3. Check if places2 transformer model is downloaded
     places2_dir = "ZITS_inpainting/ckpt/zits_places2"
     places2_model_path = os.path.join(places2_dir, "best_transformer_places2.pth")
     if not os.path.exists(places2_model_path):
-        print("Downloading best_transformer_places2.pth...")
+        print("Downloading best_transformer_places2.pth from Hugging Face...")
         os.makedirs(places2_dir, exist_ok=True)
-        import urllib.request
-        urllib.request.urlretrieve(
-            "https://huggingface.co/nguyenthanhtrung/LaMa_ZITS_cp/resolve/main/best_transformer_places2.pth",
-            places2_model_path
+        downloaded_file = hf_hub_download(
+            repo_id="nguyenthanhtrung/LaMa_ZITS_cp", 
+            filename="best_transformer_places2.pth"
         )
-        print("Downloaded best_transformer_places2.pth!")
+        import shutil
+        shutil.copy(downloaded_file, places2_model_path)
+        print("Downloaded and copied best_transformer_places2.pth!")
         
     # 4. Copy config file into place
     config_dest = os.path.join(places2_dir, "config.yml")
