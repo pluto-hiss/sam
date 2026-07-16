@@ -5,3 +5,4 @@ pillow
 opencv-python
 tqdm
 matplotlib
+triton
