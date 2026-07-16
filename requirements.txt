@@ -11,3 +11,4 @@ accelerate
 yacs
 ruamel.yaml
 pytorch-lightning
+lpips
