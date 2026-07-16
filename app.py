@@ -338,12 +338,43 @@ def interactive_click_segment(input_image, select_data: gr.SelectData):
         err_msg = traceback.format_exc()
         return None, f"Error running raw click prediction: {str(e)}\n\nDetails:\n{err_msg}"
 
+def patch_zits_nms():
+    nms_path = "ZITS-PlusPlus/trainers/nms_temp.py"
+    if os.path.exists(nms_path):
+        with open(nms_path, "r") as f:
+            content = f.read()
+            
+        if 'cdll.LoadLibrary(' in content and 'try:' not in content:
+            print("Patching ZITS++ nms_temp.py to handle ctypes load failure...")
+            target = 'solver = cdll.LoadLibrary("/home/wmlce/dql_inpainting/CNN_final/src/cxx/lib/solve_csa.so")'
+            replacement = """try:
+    import os
+    local_so_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../src/cxx/lib/solve_csa.so"))
+    if os.path.exists(local_so_path):
+        solver = cdll.LoadLibrary(local_so_path)
+    else:
+        solver = cdll.LoadLibrary("/home/wmlce/dql_inpainting/CNN_final/src/cxx/lib/solve_csa.so")
+except Exception as e:
+    print("Warning: Failed to load solve_csa.so, using dummy solver fallback.", e)
+    class DummySolver:
+        def solve_csa(self, *args, **kwargs):
+            return 0
+    solver = DummySolver()"""
+            
+            patched_content = content.replace(target, replacement)
+            with open(nms_path, "w") as f:
+                f.write(patched_content)
+            print("ZITS++ nms_temp.py patched successfully!")
+
 def download_zits_weights():
     # 1. Ensure ZITS-PlusPlus folder is cloned
     if not os.path.exists("ZITS-PlusPlus"):
         print("Cloning ZITS-PlusPlus repository...")
         import subprocess
         subprocess.run(["git", "clone", "https://github.com/ewrfcas/ZITS-PlusPlus.git"])
+        
+    # Patch nms_temp.py to handle the ctypes load failure of solve_csa.so
+    patch_zits_nms()
         
     # 2. Check if best_lsm_hawp.pth is downloaded
     ckpts_dir = "ZITS-PlusPlus/ckpts"
