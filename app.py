@@ -50,9 +50,13 @@ def init_model(load_source="community", hf_token=None):
         print(f"Building SAM 3 model on {DEVICE}...")
         
         if checkpoint_path:
-            MODEL = build_sam3_image_model(checkpoint_path=checkpoint_path, load_from_HF=False)
+            MODEL = build_sam3_image_model(
+                checkpoint_path=checkpoint_path, 
+                enable_inst_interactivity=True, 
+                load_from_HF=False
+            )
         else:
-            MODEL = build_sam3_image_model()
+            MODEL = build_sam3_image_model(enable_inst_interactivity=True)
             
         MODEL.to(DEVICE)
         MODEL.eval()
