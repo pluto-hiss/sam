@@ -15,5 +15,4 @@ lpips
 trimesh
 omegaconf
 einops
-torchmcubes
 rembg
